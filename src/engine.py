@@ -2,6 +2,7 @@ import os
 import logging
 import json
 import asyncio
+from collections import defaultdict
 
 from dotenv import load_dotenv
 from typing import AsyncGenerator, Optional
@@ -127,42 +128,63 @@ class vLLMEngine:
             request_id
         )
 
+
         n_responses = validated_sampling_params.n
         is_first_output = True
         n_input_tokens = 0
 
-        async for request_output in results_generator:
-            if is_first_output:
-                n_input_tokens = len(request_output.prompt_token_ids)
-                is_first_output = False
+        last_texts = defaultdict(str)
 
-            for output in request_output.outputs:
-                if stream:
-                    # ✅ vLLM이 보장하는 "현재 step의 텍스트" 그대로 사용
+        if stream:
+            async for request_output in results_generator:
+                for output in request_output.outputs:
+                    full_text = output.text
+                    prev_text = last_texts[output.index]
+
+                    delta = (
+                        full_text[len(prev_text):]
+                        if full_text.startswith(prev_text)
+                        else full_text
+                    )
+
+                    last_texts[output.index] = full_text
+
                     yield {
-                        "choices": [
-                            {
-                                "index": output.index,
-                                "delta": {
-                                    "content": output.text
-                                },
-                                "finish_reason": None
-                            }
-                        ]
+                        "choices": [{
+                            "index": output.index,
+                            "delta": {"content": delta},
+                            "finish_reason": None
+                        }]
                     }
 
-        # ✅ stream 종료 신호
-        if stream:
+            yield {
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }]
+            }
+
+        else:
+            final_outputs = {}
+
+            async for request_output in results_generator:
+                for output in request_output.outputs:
+                    final_outputs[output.index] = output.text
+
             yield {
                 "choices": [
                     {
-                        "index": 0,
-                        "delta": {},
+                        "index": idx,
+                        "message": {
+                            "role": "assistant",
+                            "content": text
+                        },
                         "finish_reason": "stop"
                     }
+                    for idx, text in final_outputs.items()
                 ]
             }
-
 
     def _initialize_llm(self):
         try:
@@ -298,4 +320,4 @@ class OpenAIvLLMEngine(vLLMEngine):
                 )
                 yield data
 
-                
+            
